@@ -1,0 +1,161 @@
+name: Build Android App
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GRADLE_OPTS: "-Xmx3g -Dfile.encoding=UTF-8"
+
+jobs:
+  build:
+    name: Build Release APK & AAB
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up JDK 21 (Gradle/AGP) and JDK 25 (Ant/Peergos server)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: |
+            25
+            21
+          cache: gradle
+
+      - name: Install Ant
+        run: sudo apt-get update && sudo apt-get install -y ant
+
+      - name: Configure Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build Peergos fat JAR from web-ui submodule
+        run: ./gradlew peergosJar -Ppeergos.jdk="$JAVA_HOME_25_X64"
+
+      - name: Build Release APK
+        run: ./gradlew assembleRelease -Ppeergos.jdk="$JAVA_HOME_25_X64"
+
+      - name: Build Release AAB
+        run: ./gradlew bundleRelease -Ppeergos.jdk="$JAVA_HOME_25_X64"
+
+      - name: Verify APK
+        run: |
+          APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+          echo "APK size: $(du -h "$APK" | cut -f1)"
+          echo "APK path: $APK"
+          unzip -l "$APK" | head -30
+
+      - name: Verify AAB
+        run: |
+          AAB="app/build/outputs/bundle/release/app-release.aab"
+          echo "AAB size: $(du -h "$AAB" | cut -f1)"
+          echo "AAB path: $AAB"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: peergos-android-apk
+          path: app/build/outputs/apk/release/app-release-unsigned.apk
+          retention-days: 30
+          compression-level: 6
+
+      - name: Upload AAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: peergos-android-aab
+          path: app/build/outputs/bundle/release/app-release.aab
+          retention-days: 30
+          compression-level: 6
+
+      - name: Upload mapping files (for Play Console / crash symbolication)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: peergos-android-mappings
+          path: |
+            app/build/outputs/mapping/release/mapping.txt
+            app/build/outputs/mapping/release/mapping.json
+          retention-days: 90
+
+  lint:
+    name: Lint & Static Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      - name: Configure Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run Android Lint
+        run: ./gradlew lintRelease --no-daemon
+
+      - name: Upload Lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-report
+          path: app/build/reports/lint-results-release.html
+          retention-days: 14
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      - name: Configure Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Peergos JAR (needed for test compile)
+        run: ./gradlew peergosJar -Ppeergos.jdk="$JAVA_HOME"
+
+      - name: Run unit tests
+        run: ./gradlew testReleaseUnitTest --no-daemon
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-reports
+          path: app/build/reports/tests/testReleaseUnitTest/**/*.html
+          retention-days: 14
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
